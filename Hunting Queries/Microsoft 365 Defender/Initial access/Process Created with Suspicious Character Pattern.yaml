@@ -1,0 +1,55 @@
+id: 7622924e-3613-430e-916a-a0158242f9e5
+name: Process Created with Suspicious Character Pattern
+description: |
+  One technique used by attackers to trick users into launching an application is to swap characters with
+  similar-looking ones in different languages. This query looks for pairings of Latin alpha characters with
+  either Greek or Cyrillic characters, or where more than one of the following characters is present:
+  - LatinSupplement
+  - LatinExtendedA
+  - LatinExtendedB
+  - Modifier Letters
+  - Diacritical mark identifiers
+  The analysis function was implemented as an invokable function so that you can reuse it on other tables
+  or fields of your choosing.
+  Reference for character ranges: https://www.w3schools.com/charsets/ref_utf_basic_latin.asp
+requiredDataConnectors:
+- connectorId: MicrosoftThreatProtection
+  dataTypes:
+  - DeviceProcessEvents
+query: |
+  let DetectSuspiciousCharacterPairing = (SourceData:(FileName:string))
+  {
+      SourceData
+      | distinct FileName
+      | project FileNameNoExtension = substring(FileName, 0, strlen(FileName) - indexof(reverse(FileName), '.') - 1), FileName
+      | extend CharCodes = to_utf8(FileNameNoExtension)
+      | mv-apply CharCodes to typeof(int) on 
+      (
+          extend IsLatinBasicAlpha = (CharCodes between (65 .. 90) or CharCodes  between (97 .. 122)),
+              IsLatinSupplement = CharCodes between (128 .. 255), 
+              IsLatinExtendedA = CharCodes between (256 .. 383),
+              IsLatinExtendedB = CharCodes between (384 .. 591),
+              IsModifier = CharCodes between (688 .. 767),
+              IsDiacritical = CharCodes between (768 .. 879),
+              IsGreek = CharCodes between (880 .. 1023),
+              IsCyrillic = CharCodes between (1024 .. 1327)        
+          | summarize 
+              IsLatinBasicAlpha = max(IsLatinBasicAlpha), 
+              IsLatinSupplement = max(IsLatinSupplement),
+              IsLatinExtendedA = max(IsLatinExtendedA),
+              IsLatinExtendedB = max(IsLatinExtendedB),
+              IsModifier = max(IsModifier),
+              IsDiacritical = max(IsDiacritical),
+              IsGreek = max(IsGreek),
+              IsCyrillic = max(IsCyrillic)
+              by FileNameNoExtension, FileName
+      )
+      | extend IsSuspicious =  
+          (IsLatinBasicAlpha and (IsCyrillic or IsGreek))
+          or ((toint(IsLatinSupplement) +  toint(IsLatinExtendedA) + toint(IsLatinExtendedB) + toint(IsModifier) + toint(IsDiacritical)) > 1)
+      | project-away FileNameNoExtension
+      | join SourceData on FileName
+  };
+  DeviceProcessEvents
+  | invoke DetectSuspiciousCharacterPairing()
+  | where IsSuspicious == true
